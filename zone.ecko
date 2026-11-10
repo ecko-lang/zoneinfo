@@ -1,0 +1,271 @@
+# Named time zones over the IANA data in tzdata.ecko. Internal to the package:
+# main.ecko builds the public API on these, and does not re-export them.
+#
+# A zone answers one question: at this instant, what is the offset from UTC,
+# and what is it called? Everything else - wall times, zone-aware arithmetic,
+# formatting - is built on that answer by main.ecko.
+#
+# Up to its last recorded transition a zone is a sorted list of instants, each
+# switching to a local time type (offset, DST flag, abbreviation). After it, a
+# POSIX TZ rule such as "CET-1CEST,M3.5.0,M10.5.0/3" says when DST starts and
+# ends every year, so instants past 2037 work without data for each year.
+
+import "./calendar.ecko"
+import "./tzdata.ecko"
+
+DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+DAY = 86400
+
+# The error for a zone name nothing knows. `parse`, an existing kind: the
+# name is input that does not read as a zone.
+fn unknown(name) {
+    error(
+        {
+            kind: "parse",
+            format: "zone",
+            message: "unknown time zone '{name}' - see zoneinfo.zones() for the names",
+        },
+    )
+}
+
+# ---- the index ---------------------------------------------------------------
+# tzdata.ecko holds the data as two multi-line strings, which is what keeps
+# importing zoneinfo cheap. The first zone lookup splits them into maps, once
+# per process.
+INDEX = cell(null)
+
+fn lines_to_map(text) {
+    mut m = {}
+    for line in split(trim(text), "\n") {
+        eq = index_of(line, "=")
+        m = insert(m, line[0..eq], line[eq + 1..len(line)])
+    }
+    m
+}
+
+fn index() {
+    have = cell_get(INDEX)
+    unless is_null(have) { return have }
+    built = { zones: lines_to_map(tzdata.ZONES), links: lines_to_map(tzdata.LINKS) }
+    cell_set(INDEX, built)
+    built
+}
+
+## The name `name` resolves to in the data: itself, or the zone an alias names.
+export fn canonical(name) {
+    ix = index()
+    unless is_null(get(ix.zones, name)) { return name }
+    target = get(ix.links, name)
+    if is_null(target) { unknown(name) }
+    target
+}
+
+## Every zone and alias name, sorted.
+export fn names() = sort(flatten([keys(index().zones), keys(index().links)]))
+
+## The IANA release the data comes from.
+export fn version() = tzdata.VERSION
+
+# ---- decoding ----------------------------------------------------------------
+# Decoded zones, by canonical name. Decoding a zone is a few hundred numbers,
+# so it is done once per zone per process rather than on every lookup.
+DECODED = cell({})
+
+fn from36(s) {
+    if s[0..1] == "-" { return 0 - from36(s[1..len(s)]) }
+    mut n = 0
+    for c in chars(s) {
+        n = n * 36 + index_of(DIGITS, c)
+    }
+    n
+}
+
+fn decode(packed) {
+    parts = split(packed, "|")
+    types = split(parts[0], ";") |> map(fn(t) {
+        f = split(t, ",")
+        { off: int(f[0]), dst: f[1] == "1", abbr: f[2] }
+    })
+    mut times = []
+    mut idx = []
+    mut moment = 0
+    unless parts[1] == "" {
+        entries = split(parts[1], ",")
+        for i in 0..len(entries) {
+            e = entries[i]
+            n = len(e)
+            delta = from36(e[0..n - 1])
+            moment = if i == 0 { delta } else { moment + delta }
+            times = push(times, moment)
+            idx = push(idx, index_of(DIGITS, e[n - 1..n]))
+        }
+    }
+    rule = if parts[2] == "" { null } else { parse_rule(parts[2]) }
+    { types: types, times: times, idx: idx, rule: rule }
+}
+
+fn zone_data(name) {
+    key = canonical(name)
+    hit = get(cell_get(DECODED), key)
+    unless is_null(hit) { return hit }
+    z = decode(get(index().zones, key))
+    cell_update(DECODED, fn(m) insert(m, key, z))
+    z
+}
+
+# ---- lookup --------------------------------------------------------------------
+
+## The local time type at `secs` (Unix seconds) in zone `name`:
+## `{ off, dst, abbr }`, `off` in seconds east of UTC.
+export fn at(name, secs) {
+    z = zone_data(name)
+    n = len(z.times)
+    # Before the first transition, the first type (RFC 8536 3.2).
+    if n == 0 or secs < z.times[0] {
+        if n == 0 and not is_null(z.rule) { return rule_at(z.rule, secs) }
+        return z.types[0]
+    }
+    if secs >= z.times[n - 1] and not is_null(z.rule) { return rule_at(z.rule, secs) }
+    # The last transition at or before `secs`.
+    mut lo = 0
+    mut hi = n - 1
+    while lo < hi {
+        mid = (lo + hi + 1) // 2
+        if z.times[mid] <= secs { lo = mid } else { hi = mid - 1 }
+    }
+    z.types[z.idx[lo]]
+}
+
+## The instant, in Unix seconds, that wall time `wall` (seconds, read as if UTC)
+## names in zone `name`.
+##
+## A wall time a DST change skips moves forward by the length of the gap: 02:30
+## on a night that jumps from 02:00 to 03:00 is 03:30. One a change repeats is
+## its first occurrence, the one still on the earlier offset.
+export fn to_utc(name, wall) {
+    before = at(name, wall - DAY).off
+    after = at(name, wall + DAY).off
+    candidates = if before == after { [before] } else { [before, after] }
+    mut best = null
+    for off in candidates {
+        u = wall - off
+        if at(name, u).off == off and (is_null(best) or u < best) { best = u }
+    }
+    if is_null(best) { wall - before } else { best }
+}
+
+# ---- POSIX TZ rules ------------------------------------------------------------
+# "STDoffset[DST[offset][,start[/time],end[/time]]]", with RFC 8536's extension
+# that a time may be negative or past 24:00. A POSIX offset is hours WEST of
+# UTC, the opposite sign to everything else here.
+
+fn is_letter(c) = contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", c)
+
+# Read an abbreviation at `i`: letters, or anything between < and >.
+fn read_abbr(cs, i) {
+    if cs[i] == "<" {
+        mut j = i + 1
+        while cs[j] != ">" {
+            j = j + 1
+        }
+        return { value: join(slice(cs, i + 1, j), ""), next: j + 1 }
+    }
+    mut j = i
+    while j < len(cs) and is_letter(cs[j]) {
+        j = j + 1
+    }
+    { value: join(slice(cs, i, j), ""), next: j }
+}
+
+# Read [+-]h[:mm[:ss]] at `i` as seconds.
+fn read_hms(cs, i) {
+    mut j = i
+    mut sign = 1
+    if j < len(cs) and (cs[j] == "+" or cs[j] == "-") {
+        if cs[j] == "-" { sign = -1 }
+        j = j + 1
+    }
+    mut fields = [0, 0, 0]
+    mut k = 0
+    mut n = 0
+    while j < len(cs) and (contains("0123456789", cs[j]) or cs[j] == ":") {
+        if cs[j] == ":" {
+            fields = set(fields, k, n)
+            k = k + 1
+            n = 0
+        } else { n = n * 10 + int(cs[j]) }
+        j = j + 1
+    }
+    fields = set(fields, k, n)
+    { value: sign * (fields[0] * 3600 + fields[1] * 60 + fields[2]), next: j }
+}
+
+# One "date[/time]" of a rule.
+fn parse_when(s) {
+    p = split(s, "/")
+    time = if len(p) > 1 { read_hms(chars(p[1]), 0).value } else { 7200 }
+    d = p[0]
+    if d[0..1] == "M" {
+        f = split(d[1..len(d)], ".")
+        return { form: "M", month: int(f[0]), week: int(f[1]), weekday: int(f[2]), time: time }
+    }
+    if d[0..1] == "J" { return { form: "J", n: int(d[1..len(d)]), time: time } }
+    { form: "n", n: int(d), time: time }
+}
+
+fn parse_rule(s) {
+    parts = split(s, ",")
+    cs = chars(parts[0])
+    std_name = read_abbr(cs, 0)
+    std_off = read_hms(cs, std_name.next)
+    std = { off: 0 - std_off.value, dst: false, abbr: std_name.value }
+    if std_off.next >= len(cs) { return { std: std, dst: null } }
+    dst_name = read_abbr(cs, std_off.next)
+    dst_off = if dst_name.next < len(cs) {
+        0 - read_hms(cs, dst_name.next).value
+    } else {
+        std.off + 3600
+    }
+    # A DST with no dates takes the US rule, the POSIX default.
+    start = if len(parts) > 2 { parse_when(parts[1]) } else { parse_when("M3.2.0") }
+    end = if len(parts) > 2 { parse_when(parts[2]) } else { parse_when("M11.1.0") }
+    { std: std, dst: { off: dst_off, dst: true, abbr: dst_name.value }, start: start, end: end }
+}
+
+# The day, as days since 1970, that a rule date falls on in year `y`.
+fn rule_day(w, y) {
+    jan1 = calendar.days_from_civil(y, 1, 1)
+    if w.form == "J" {
+        # 1-365, never counting 29 February.
+        leap = y % 4 == 0 and y % 100 != 0 or y % 400 == 0
+        return jan1 + w.n - 1 + if leap and w.n >= 60 { 1 } else { 0 }
+    }
+    if w.form == "n" { return jan1 + w.n }
+    # Mm.w.d: weekday d (0 = Sunday) of week w of month m, week 5 meaning last.
+    first = calendar.days_from_civil(y, w.month, 1)
+    first_wd = (first + 4) % 7  # 1970-01-01 was a Thursday
+    mut d = first + (w.weekday - first_wd + 7) % 7 + (w.week - 1) * 7
+    next_month = if w.month == 12 {
+        calendar.days_from_civil(y + 1, 1, 1)
+    } else {
+        calendar.days_from_civil(y, w.month + 1, 1)
+    }
+    while d >= next_month {
+        d = d - 7
+    }
+    d
+}
+
+fn rule_at(r, secs) {
+    if is_null(r.dst) { return r.std }
+    # The year in local standard time; neither change crosses New Year.
+    y = calendar.civil_from_days((secs + r.std.off) // DAY)[0]
+    # A start time is read on the standard clock, an end time on the DST one.
+    start = rule_day(r.start, y) * DAY + r.start.time - r.std.off
+    end = rule_day(r.end, y) * DAY + r.end.time - r.dst.off
+    in_dst = if start < end { secs >= start and secs < end } else {
+        # Southern hemisphere: DST spans New Year.
+        secs < end or secs >= start
+    }
+    if in_dst { r.dst } else { r.std }
+}

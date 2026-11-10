@@ -1,0 +1,442 @@
+# zoneinfo: offsets, wall times and zone-aware arithmetic.
+#
+# The expected values come from Python's zoneinfo (an independent reader of
+# the same IANA 2026e data), taken once and written in here so the tests stay
+# offline and deterministic. They cover northern and southern DST, a 30-minute
+# DST (Lord Howe), negative DST (Dublin), DST that ends at 24:00 (Santiago) or
+# starts at -1:00 (Nuuk), a 45-minute offset (Chatham), Casablanca's
+# Ramadan rule, and instants after 2037, where only the POSIX rule applies.
+import std.test
+import std.time
+import "../main.ecko"
+zi = main
+
+HOUR = 3600000
+
+# A UTC instant, for building test inputs.
+fn utc(y, mo, d, h = 0) = zi.from_components("UTC", y, mo, d, h)
+
+# [zone, unix seconds, offset seconds, abbreviation]
+OFFSETS = [
+    ["America/New_York", -629942400, -18000, "EST"],
+    ["America/New_York", -615513600, -14400, "EDT"],
+    ["America/New_York", 158976000, -18000, "EST"],
+    ["America/New_York", 173404800, -14400, "EDT"],
+    ["America/New_York", 947894400, -18000, "EST"],
+    ["America/New_York", 962409600, -14400, "EDT"],
+    ["America/New_York", 1768435200, -18000, "EST"],
+    ["America/New_York", 1772953199, -18000, "EST"],
+    ["America/New_York", 1772953200, -14400, "EDT"],
+    ["America/New_York", 1782864000, -14400, "EDT"],
+    ["America/New_York", 1793512799, -14400, "EDT"],
+    ["America/New_York", 1793512800, -18000, "EST"],
+    ["America/New_York", 4103654400, -18000, "EST"],
+    ["America/New_York", 4108690799, -18000, "EST"],
+    ["America/New_York", 4108690800, -14400, "EDT"],
+    ["America/New_York", 4118083200, -14400, "EDT"],
+    ["America/New_York", 4129250399, -14400, "EDT"],
+    ["America/New_York", 4129250400, -18000, "EST"],
+    ["America/New_York", 13570675200, -18000, "EST"],
+    ["America/New_York", 13585190400, -14400, "EDT"],
+    ["Europe/Berlin", -629942400, 3600, "CET"],
+    ["Europe/Berlin", -615513600, 3600, "CET"],
+    ["Europe/Berlin", 158976000, 3600, "CET"],
+    ["Europe/Berlin", 173404800, 3600, "CET"],
+    ["Europe/Berlin", 947894400, 3600, "CET"],
+    ["Europe/Berlin", 962409600, 7200, "CEST"],
+    ["Europe/Berlin", 1768435200, 3600, "CET"],
+    ["Europe/Berlin", 1774745999, 3600, "CET"],
+    ["Europe/Berlin", 1774746000, 7200, "CEST"],
+    ["Europe/Berlin", 1782864000, 7200, "CEST"],
+    ["Europe/Berlin", 1792889999, 7200, "CEST"],
+    ["Europe/Berlin", 1792890000, 3600, "CET"],
+    ["Europe/Berlin", 4103654400, 3600, "CET"],
+    ["Europe/Berlin", 4109878799, 3600, "CET"],
+    ["Europe/Berlin", 4109878800, 7200, "CEST"],
+    ["Europe/Berlin", 4118083200, 7200, "CEST"],
+    ["Europe/Berlin", 4128627599, 7200, "CEST"],
+    ["Europe/Berlin", 4128627600, 3600, "CET"],
+    ["Europe/Berlin", 13570675200, 3600, "CET"],
+    ["Europe/Berlin", 13585190400, 7200, "CEST"],
+    ["Australia/Sydney", -629942400, 36000, "AEST"],
+    ["Australia/Sydney", -615513600, 36000, "AEST"],
+    ["Australia/Sydney", 158976000, 39600, "AEDT"],
+    ["Australia/Sydney", 173404800, 36000, "AEST"],
+    ["Australia/Sydney", 947894400, 39600, "AEDT"],
+    ["Australia/Sydney", 962409600, 36000, "AEST"],
+    ["Australia/Sydney", 1768435200, 39600, "AEDT"],
+    ["Australia/Sydney", 1775318399, 39600, "AEDT"],
+    ["Australia/Sydney", 1775318400, 36000, "AEST"],
+    ["Australia/Sydney", 1782864000, 36000, "AEST"],
+    ["Australia/Sydney", 1791043199, 36000, "AEST"],
+    ["Australia/Sydney", 1791043200, 39600, "AEDT"],
+    ["Australia/Sydney", 4103654400, 39600, "AEDT"],
+    ["Australia/Sydney", 4110451199, 39600, "AEDT"],
+    ["Australia/Sydney", 4110451200, 36000, "AEST"],
+    ["Australia/Sydney", 4118083200, 36000, "AEST"],
+    ["Australia/Sydney", 4126175999, 36000, "AEST"],
+    ["Australia/Sydney", 4126176000, 39600, "AEDT"],
+    ["Australia/Sydney", 13570675200, 39600, "AEDT"],
+    ["Australia/Sydney", 13585190400, 36000, "AEST"],
+    ["Pacific/Auckland", -629942400, 43200, "NZST"],
+    ["Pacific/Auckland", -615513600, 43200, "NZST"],
+    ["Pacific/Auckland", 158976000, 46800, "NZDT"],
+    ["Pacific/Auckland", 173404800, 43200, "NZST"],
+    ["Pacific/Auckland", 947894400, 46800, "NZDT"],
+    ["Pacific/Auckland", 962409600, 43200, "NZST"],
+    ["Pacific/Auckland", 1768435200, 46800, "NZDT"],
+    ["Pacific/Auckland", 1775311199, 46800, "NZDT"],
+    ["Pacific/Auckland", 1775311200, 43200, "NZST"],
+    ["Pacific/Auckland", 1782864000, 43200, "NZST"],
+    ["Pacific/Auckland", 1790431199, 43200, "NZST"],
+    ["Pacific/Auckland", 1790431200, 46800, "NZDT"],
+    ["Pacific/Auckland", 4103654400, 46800, "NZDT"],
+    ["Pacific/Auckland", 4110443999, 46800, "NZDT"],
+    ["Pacific/Auckland", 4110444000, 43200, "NZST"],
+    ["Pacific/Auckland", 4118083200, 43200, "NZST"],
+    ["Pacific/Auckland", 4125563999, 43200, "NZST"],
+    ["Pacific/Auckland", 4125564000, 46800, "NZDT"],
+    ["Pacific/Auckland", 13570675200, 46800, "NZDT"],
+    ["Pacific/Auckland", 13585190400, 43200, "NZST"],
+    ["Australia/Lord_Howe", -629942400, 36000, "AEST"],
+    ["Australia/Lord_Howe", -615513600, 36000, "AEST"],
+    ["Australia/Lord_Howe", 158976000, 36000, "AEST"],
+    ["Australia/Lord_Howe", 173404800, 36000, "AEST"],
+    ["Australia/Lord_Howe", 947894400, 39600, "+11"],
+    ["Australia/Lord_Howe", 962409600, 37800, "+1030"],
+    ["Australia/Lord_Howe", 1768435200, 39600, "+11"],
+    ["Australia/Lord_Howe", 1775314799, 39600, "+11"],
+    ["Australia/Lord_Howe", 1775314800, 37800, "+1030"],
+    ["Australia/Lord_Howe", 1782864000, 37800, "+1030"],
+    ["Australia/Lord_Howe", 1791041399, 37800, "+1030"],
+    ["Australia/Lord_Howe", 1791041400, 39600, "+11"],
+    ["Australia/Lord_Howe", 4103654400, 39600, "+11"],
+    ["Australia/Lord_Howe", 4110447599, 39600, "+11"],
+    ["Australia/Lord_Howe", 4110447600, 37800, "+1030"],
+    ["Australia/Lord_Howe", 4118083200, 37800, "+1030"],
+    ["Australia/Lord_Howe", 4126174199, 37800, "+1030"],
+    ["Australia/Lord_Howe", 4126174200, 39600, "+11"],
+    ["Australia/Lord_Howe", 13570675200, 39600, "+11"],
+    ["Australia/Lord_Howe", 13585190400, 37800, "+1030"],
+    ["Asia/Kolkata", -629942400, 19800, "IST"],
+    ["Asia/Kolkata", -615513600, 19800, "IST"],
+    ["Asia/Kolkata", 158976000, 19800, "IST"],
+    ["Asia/Kolkata", 173404800, 19800, "IST"],
+    ["Asia/Kolkata", 947894400, 19800, "IST"],
+    ["Asia/Kolkata", 962409600, 19800, "IST"],
+    ["Asia/Kolkata", 1768435200, 19800, "IST"],
+    ["Asia/Kolkata", 1782864000, 19800, "IST"],
+    ["Asia/Kolkata", 4103654400, 19800, "IST"],
+    ["Asia/Kolkata", 4118083200, 19800, "IST"],
+    ["Asia/Kolkata", 13570675200, 19800, "IST"],
+    ["Asia/Kolkata", 13585190400, 19800, "IST"],
+    ["Europe/Dublin", -629942400, 0, "GMT"],
+    ["Europe/Dublin", -615513600, 3600, "IST"],
+    ["Europe/Dublin", 158976000, 0, "GMT"],
+    ["Europe/Dublin", 173404800, 3600, "IST"],
+    ["Europe/Dublin", 947894400, 0, "GMT"],
+    ["Europe/Dublin", 962409600, 3600, "IST"],
+    ["Europe/Dublin", 1768435200, 0, "GMT"],
+    ["Europe/Dublin", 1774745999, 0, "GMT"],
+    ["Europe/Dublin", 1774746000, 3600, "IST"],
+    ["Europe/Dublin", 1782864000, 3600, "IST"],
+    ["Europe/Dublin", 1792889999, 3600, "IST"],
+    ["Europe/Dublin", 1792890000, 0, "GMT"],
+    ["Europe/Dublin", 4103654400, 0, "GMT"],
+    ["Europe/Dublin", 4109878799, 0, "GMT"],
+    ["Europe/Dublin", 4109878800, 3600, "IST"],
+    ["Europe/Dublin", 4118083200, 3600, "IST"],
+    ["Europe/Dublin", 4128627599, 3600, "IST"],
+    ["Europe/Dublin", 4128627600, 0, "GMT"],
+    ["Europe/Dublin", 13570675200, 0, "GMT"],
+    ["Europe/Dublin", 13585190400, 3600, "IST"],
+    ["Africa/Casablanca", -629942400, 0, "+00"],
+    ["Africa/Casablanca", -615513600, 3600, "+01"],
+    ["Africa/Casablanca", 158976000, 0, "+00"],
+    ["Africa/Casablanca", 173404800, 0, "+00"],
+    ["Africa/Casablanca", 947894400, 0, "+00"],
+    ["Africa/Casablanca", 962409600, 0, "+00"],
+    ["Africa/Casablanca", 1768435200, 3600, "+01"],
+    ["Africa/Casablanca", 1771120799, 3600, "+01"],
+    ["Africa/Casablanca", 1771120800, 0, "+00"],
+    ["Africa/Casablanca", 1774144799, 0, "+00"],
+    ["Africa/Casablanca", 1774144800, 3600, "+01"],
+    ["Africa/Casablanca", 1782864000, 3600, "+01"],
+    ["Africa/Casablanca", 1789865999, 3600, "+01"],
+    ["Africa/Casablanca", 1789866000, 0, "+00"],
+    ["Africa/Casablanca", 4103654400, 0, "+00"],
+    ["Africa/Casablanca", 4118083200, 0, "+00"],
+    ["Africa/Casablanca", 13570675200, 0, "+00"],
+    ["Africa/Casablanca", 13585190400, 0, "+00"],
+    ["America/Santiago", -629942400, -14400, "-04"],
+    ["America/Santiago", -615513600, -14400, "-04"],
+    ["America/Santiago", 158976000, -10800, "-03"],
+    ["America/Santiago", 173404800, -14400, "-04"],
+    ["America/Santiago", 947894400, -10800, "-03"],
+    ["America/Santiago", 962409600, -14400, "-04"],
+    ["America/Santiago", 1768435200, -10800, "-03"],
+    ["America/Santiago", 1775357999, -10800, "-03"],
+    ["America/Santiago", 1775358000, -14400, "-04"],
+    ["America/Santiago", 1782864000, -14400, "-04"],
+    ["America/Santiago", 1788667199, -14400, "-04"],
+    ["America/Santiago", 1788667200, -10800, "-03"],
+    ["America/Santiago", 4103654400, -10800, "-03"],
+    ["America/Santiago", 4110490799, -10800, "-03"],
+    ["America/Santiago", 4110490800, -14400, "-04"],
+    ["America/Santiago", 4118083200, -14400, "-04"],
+    ["America/Santiago", 4123799999, -14400, "-04"],
+    ["America/Santiago", 4123800000, -10800, "-03"],
+    ["America/Santiago", 13570675200, -10800, "-03"],
+    ["America/Santiago", 13585190400, -14400, "-04"],
+    ["America/Nuuk", -629942400, -10800, "-03"],
+    ["America/Nuuk", -615513600, -10800, "-03"],
+    ["America/Nuuk", 158976000, -10800, "-03"],
+    ["America/Nuuk", 173404800, -10800, "-03"],
+    ["America/Nuuk", 947894400, -10800, "-03"],
+    ["America/Nuuk", 962409600, -7200, "-02"],
+    ["America/Nuuk", 1768435200, -7200, "-02"],
+    ["America/Nuuk", 1774745999, -7200, "-02"],
+    ["America/Nuuk", 1774746000, -3600, "-01"],
+    ["America/Nuuk", 1782864000, -3600, "-01"],
+    ["America/Nuuk", 1792889999, -3600, "-01"],
+    ["America/Nuuk", 1792890000, -7200, "-02"],
+    ["America/Nuuk", 4103654400, -7200, "-02"],
+    ["America/Nuuk", 4109878799, -7200, "-02"],
+    ["America/Nuuk", 4109878800, -3600, "-01"],
+    ["America/Nuuk", 4118083200, -3600, "-01"],
+    ["America/Nuuk", 4128627599, -3600, "-01"],
+    ["America/Nuuk", 4128627600, -7200, "-02"],
+    ["America/Nuuk", 13570675200, -7200, "-02"],
+    ["America/Nuuk", 13585190400, -3600, "-01"],
+    ["Pacific/Chatham", -629942400, 45900, "+1245"],
+    ["Pacific/Chatham", -615513600, 45900, "+1245"],
+    ["Pacific/Chatham", 158976000, 49500, "+1345"],
+    ["Pacific/Chatham", 173404800, 45900, "+1245"],
+    ["Pacific/Chatham", 947894400, 49500, "+1345"],
+    ["Pacific/Chatham", 962409600, 45900, "+1245"],
+    ["Pacific/Chatham", 1768435200, 49500, "+1345"],
+    ["Pacific/Chatham", 1775311199, 49500, "+1345"],
+    ["Pacific/Chatham", 1775311200, 45900, "+1245"],
+    ["Pacific/Chatham", 1782864000, 45900, "+1245"],
+    ["Pacific/Chatham", 1790431199, 45900, "+1245"],
+    ["Pacific/Chatham", 1790431200, 49500, "+1345"],
+    ["Pacific/Chatham", 4103654400, 49500, "+1345"],
+    ["Pacific/Chatham", 4110443999, 49500, "+1345"],
+    ["Pacific/Chatham", 4110444000, 45900, "+1245"],
+    ["Pacific/Chatham", 4118083200, 45900, "+1245"],
+    ["Pacific/Chatham", 4125563999, 45900, "+1245"],
+    ["Pacific/Chatham", 4125564000, 49500, "+1345"],
+    ["Pacific/Chatham", 13570675200, 49500, "+1345"],
+    ["Pacific/Chatham", 13585190400, 45900, "+1245"],
+    ["Asia/Tehran", -629942400, 12600, "+0330"],
+    ["Asia/Tehran", -615513600, 12600, "+0330"],
+    ["Asia/Tehran", 158976000, 12600, "+0330"],
+    ["Asia/Tehran", 173404800, 12600, "+0330"],
+    ["Asia/Tehran", 947894400, 12600, "+0330"],
+    ["Asia/Tehran", 962409600, 16200, "+0430"],
+    ["Asia/Tehran", 1768435200, 12600, "+0330"],
+    ["Asia/Tehran", 1782864000, 12600, "+0330"],
+    ["Asia/Tehran", 4103654400, 12600, "+0330"],
+    ["Asia/Tehran", 4118083200, 12600, "+0330"],
+    ["Asia/Tehran", 13570675200, 12600, "+0330"],
+    ["Asia/Tehran", 13585190400, 12600, "+0330"],
+    ["Etc/UTC", -629942400, 0, "UTC"],
+    ["Etc/UTC", -615513600, 0, "UTC"],
+    ["Etc/UTC", 158976000, 0, "UTC"],
+    ["Etc/UTC", 173404800, 0, "UTC"],
+    ["Etc/UTC", 947894400, 0, "UTC"],
+    ["Etc/UTC", 962409600, 0, "UTC"],
+    ["Etc/UTC", 1768435200, 0, "UTC"],
+    ["Etc/UTC", 1782864000, 0, "UTC"],
+    ["Etc/UTC", 4103654400, 0, "UTC"],
+    ["Etc/UTC", 4118083200, 0, "UTC"],
+    ["Etc/UTC", 13570675200, 0, "UTC"],
+    ["Etc/UTC", 13585190400, 0, "UTC"],
+    ["America/St_Johns", -629942400, -12600, "NST"],
+    ["America/St_Johns", -615513600, -9000, "NDT"],
+    ["America/St_Johns", 158976000, -12600, "NST"],
+    ["America/St_Johns", 173404800, -9000, "NDT"],
+    ["America/St_Johns", 947894400, -12600, "NST"],
+    ["America/St_Johns", 962409600, -9000, "NDT"],
+    ["America/St_Johns", 1768435200, -12600, "NST"],
+    ["America/St_Johns", 1772947799, -12600, "NST"],
+    ["America/St_Johns", 1772947800, -9000, "NDT"],
+    ["America/St_Johns", 1782864000, -9000, "NDT"],
+    ["America/St_Johns", 1793507399, -9000, "NDT"],
+    ["America/St_Johns", 1793507400, -12600, "NST"],
+    ["America/St_Johns", 4103654400, -12600, "NST"],
+    ["America/St_Johns", 4108685399, -12600, "NST"],
+    ["America/St_Johns", 4108685400, -9000, "NDT"],
+    ["America/St_Johns", 4118083200, -9000, "NDT"],
+    ["America/St_Johns", 4129244999, -9000, "NDT"],
+    ["America/St_Johns", 4129245000, -12600, "NST"],
+    ["America/St_Johns", 13570675200, -12600, "NST"],
+    ["America/St_Johns", 13585190400, -9000, "NDT"],
+]
+
+# [zone, year, month, day, hour, minute, unix seconds]: a wall time read in the
+# zone. Includes a time a DST change skips (it moves forward by the gap) and
+# one it repeats (the first occurrence wins).
+WALLS = [
+    ["America/New_York", 2026, 3, 8, 2, 30, 1772955000],
+    ["America/New_York", 2026, 11, 1, 1, 30, 1793511000],
+    ["America/New_York", 2026, 7, 4, 12, 0, 1783180800],
+    ["Europe/Berlin", 2026, 3, 29, 2, 30, 1774747800],
+    ["Europe/Berlin", 2026, 10, 25, 2, 30, 1792888200],
+    ["Europe/Berlin", 2026, 1, 10, 9, 0, 1768032000],
+    ["Australia/Sydney", 2026, 10, 4, 2, 30, 1791045000],
+    ["Australia/Sydney", 2026, 4, 5, 2, 30, 1775316600],
+    ["Australia/Sydney", 2026, 12, 25, 18, 0, 1798182000],
+    ["Australia/Lord_Howe", 2026, 4, 5, 1, 45, 1775313900],
+    ["Australia/Lord_Howe", 2026, 10, 4, 2, 15, 1791042300],
+    ["America/Santiago", 2026, 9, 6, 0, 30, 1788669000],
+    ["Europe/Berlin", 2100, 3, 28, 2, 30, 4109880600],
+    ["America/New_York", 2100, 11, 7, 1, 30, 4129248600],
+]
+
+test.case(
+    "offset and abbreviation match zoneinfo at 254 instants",
+    fn() {
+        mut wrong = []
+        for row in OFFSETS {
+            z = zi.in_zone(row[1] * 1000, row[0])
+            unless z.offset == row[2] * 1000 and z.abbreviation == row[3] {
+                wrong = push(
+                    wrong,
+                    "{row[0]} @ {row[1]}: got {z.offset / 1000} {z.abbreviation}, want {row[2]} {row[3]}",
+                )
+            }
+        }
+        test.eq(wrong, [])
+    },
+)
+
+test.case("a wall time in a zone becomes the same instant zoneinfo gives", fn() {
+    mut wrong = []
+    for w in WALLS {
+        got = zi.from_components(w[0], w[1], w[2], w[3], w[4], w[5])
+        unless got == w[6] * 1000 { wrong = push(wrong, "{w}: got {got / 1000}") }
+    }
+    test.eq(wrong, [])
+})
+
+test.case("in_zone gives the local wall time across both Berlin changes", fn() {
+    # 2026-03-29 01:00 UTC is 03:00 CEST; an hour before it is 01:00 CET.
+    spring = utc(2026, 3, 29, 1)
+    test.eq(
+        [
+            zi.in_zone(spring, "Europe/Berlin").hour,
+            zi.in_zone(spring, "Europe/Berlin").abbreviation,
+        ],
+        [3, "CEST"],
+    )
+    before = zi.in_zone(spring - 1 * HOUR, "Europe/Berlin")
+    test.eq([before.hour, before.abbreviation, before.dst], [1, "CET", false])
+    # 2026-10-25 01:00 UTC is 02:00 CET, after 02:59:59 CEST.
+    autumn = zi.in_zone(utc(2026, 10, 25, 1), "Europe/Berlin")
+    test.eq([autumn.hour, autumn.offset, autumn.dst], [2, 1 * HOUR, false])
+    z = zi.in_zone(utc(2026, 7, 1, 12), "Europe/Berlin")
+    test.eq([z.year, z.month, z.day, z.hour, z.zone], [2026, 7, 1, 14, "Europe/Berlin"])
+})
+
+test.case("an alias reads as the zone it names", fn() {
+    t = utc(2026, 1, 15, 12)
+    test.eq(zi.in_zone(t, "US/Eastern").offset, zi.in_zone(t, "America/New_York").offset)
+    test.eq(zi.in_zone(t, "US/Eastern").zone, "US/Eastern")
+})
+
+test.case("an unknown zone is a parse error naming it", fn() {
+    e = try {
+        zi.in_zone(0, "Europe/Berlinn")
+        null
+    } catch (err) { err }
+    test.eq(e.kind, "parse")
+    test.ok(contains(e.message, "Europe/Berlinn"), e.message)
+})
+
+test.case("offset is the zone's offset from UTC at an instant", fn() {
+    test.eq(zi.offset(utc(2026, 7, 1), "Asia/Kolkata"), 5 * HOUR + 30 * 60000)
+    test.eq(zi.offset(utc(2026, 7, 1), "UTC"), 0)
+})
+
+# --- arithmetic on the wall clock --------------------------------------------------
+
+test.case("adding a day across spring-forward keeps the wall time", fn() {
+    # Berlin's 2026-03-29 is 23 hours long.
+    t = zi.from_components("Europe/Berlin", 2026, 3, 28, 12)
+    next = zi.add_days(t, 1, "Europe/Berlin")
+    test.eq(zi.in_zone(next, "Europe/Berlin").hour, 12)
+    test.eq(next - t, 23 * HOUR)
+})
+
+test.case("adding a day across fall-back keeps the wall time", fn() {
+    # New York's 2026-11-01 is 25 hours long.
+    t = zi.from_components("America/New_York", 2026, 10, 31, 9)
+    next = zi.add_days(t, 1, "America/New_York")
+    test.eq(zi.in_zone(next, "America/New_York").hour, 9)
+    test.eq(next - t, 25 * HOUR)
+})
+
+test.case("adding a day in the southern hemisphere keeps the wall time", fn() {
+    # Sydney springs forward on 2026-10-04.
+    t = zi.from_components("Australia/Sydney", 2026, 10, 3, 8)
+    next = zi.add_days(t, 1, "Australia/Sydney")
+    test.eq([zi.in_zone(next, "Australia/Sydney").hour, next - t], [8, 23 * HOUR])
+})
+
+test.case("in UTC a day is always 24 hours", fn() {
+    t = utc(2026, 3, 28, 12)
+    test.eq(zi.add_days(t, 1, "UTC") - t, 24 * HOUR)
+})
+
+test.case("add_months keeps the wall time in a zone", fn() {
+    t = zi.from_components("America/New_York", 2026, 1, 31, 17)
+    got = zi.in_zone(zi.add_months(t, 2, "America/New_York"), "America/New_York")
+    test.eq([got.month, got.day, got.hour], [3, 31, 17])
+})
+
+test.case("start_of_day is local midnight, or the first moment after it", fn() {
+    t = zi.from_components("Australia/Sydney", 2026, 7, 1, 15)
+    test.eq(
+        zi.start_of_day(t, "Australia/Sydney"),
+        zi.from_components("Australia/Sydney", 2026, 7, 1),
+    )
+    # Santiago skips midnight on 2026-09-06: the day starts at 01:00.
+    s = zi.start_of_day(zi.from_components("America/Santiago", 2026, 9, 6, 12), "America/Santiago")
+    test.eq(zi.in_zone(s, "America/Santiago").hour, 1)
+})
+
+# --- formatting and parsing ----------------------------------------------------
+
+test.case("format writes the wall time, with %Z and %z for the zone", fn() {
+    t = utc(2026, 7, 1, 12)
+    test.eq(zi.format(t, "%Y-%m-%d %H:%M %Z %z", "Europe/Berlin"), "2026-07-01 14:00 CEST +0200")
+    test.eq(zi.format(t, "%H:%M %z", "America/St_Johns"), "09:30 -0230")
+    test.eq(zi.format(t, "%H:%M %%z", "Europe/Berlin"), "14:00 %z")
+    test.eq(zi.format(t, "%H:%M %Z", "UTC"), "12:00 UTC")
+})
+
+test.case("to_iso writes the local time with its offset", fn() {
+    t = utc(2026, 7, 1, 12)
+    test.eq(zi.to_iso(t, "Europe/Berlin"), "2026-07-01T14:00:00.000+02:00")
+    test.eq(zi.to_iso(t, "America/New_York"), "2026-07-01T08:00:00.000-04:00")
+    test.eq(zi.to_iso(t, "UTC"), "2026-07-01T12:00:00.000+00:00")
+    test.eq(time.parse(zi.to_iso(t, "Asia/Kolkata")), t)
+})
+
+test.case("parse_format reads a wall time in a zone", fn() {
+    got = zi.parse_format("2026-07-01 14:00", "%Y-%m-%d %H:%M", "Europe/Berlin")
+    test.eq(got, utc(2026, 7, 1, 12))
+})
+
+test.case("zones lists every name, and version names the release", fn() {
+    names = zi.zones()
+    test.ok(
+        contains(names, "Europe/Berlin") and
+            contains(names, "US/Eastern") and
+            contains(names, "UTC"),
+        "missing names",
+    )
+    test.eq(names, sort(names))
+    test.eq(zi.version(), "2026e")
+})

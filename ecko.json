@@ -1,0 +1,11 @@
+{
+  "module": "github.com/ecko-lang/zoneinfo",
+  "version": "0.1.0",
+  "ecko": "0.74.0",
+  "entrypoint": "main.ecko",
+  "description": "IANA time zones for Ecko: read a timestamp as the wall time in a named zone, build one from a wall time, and do DST-correct calendar arithmetic. Pure - no capabilities.",
+  "author": "Sean Nieuwoudt <sean@underwulf.com>",
+  "license": "MIT",
+  "capabilities": [],
+  "dependencies": {}
+}

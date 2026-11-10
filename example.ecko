@@ -1,0 +1,33 @@
+# zoneinfo demo. Uses a fixed instant so the output is deterministic.
+#
+#   ecko example.ecko
+
+import std.time
+import "./main.ecko"
+zi = main
+
+t = time.parse("2026-07-16T09:30:00Z")
+
+# A timestamp stays a UTC instant; a zone is how you read it.
+for z in ["America/New_York", "Europe/Berlin", "Australia/Sydney"] {
+    print("{z}: {zi.format(t, "%Y-%m-%d %H:%M %Z (%:z)", z)}")
+}
+
+# A settlement cut-off at 17:00 New York time, as an instant.
+cutoff = zi.from_components("America/New_York", 2026, 7, 16, 17)
+print(
+    "cut-off: {time.format(cutoff, "%Y-%m-%dT%H:%M:%SZ")} ({zi.to_iso(cutoff, "America/New_York")})",
+)
+
+# A calendar day across a DST change is 23 hours long, and the wall time holds.
+before = zi.from_components("Europe/Berlin", 2026, 3, 28, 12)
+after = zi.add_days(before, 1, "Europe/Berlin")
+print(
+    "Berlin, a day after noon on 28 March: {zi.to_iso(after, "Europe/Berlin")}, {(after - before) / 3600000} hours later",
+)
+
+# 02:30 does not exist in Berlin on 29 March 2026; it reads as 03:30.
+gap = zi.from_components("Europe/Berlin", 2026, 3, 29, 2, 30)
+print("02:30 on 29 March: {zi.format(gap, "%H:%M %Z", "Europe/Berlin")}")
+
+print("tzdata {zi.version()}, {len(zi.zones())} names")

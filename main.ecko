@@ -26,19 +26,87 @@ MS_HOUR = 3600000
 MS_MIN = 60000
 MS_SEC = 1000
 
+# ---- argument checks ---------------------------------------------------------
+# A wrong-typed argument is a programmer mistake, raised as `bug` at the
+# boundary of the exported function that was called, naming it.
+fn bad_argument(fname, what, v) {
+    error(
+        {
+            kind: "bug",
+            reason: "bad_argument",
+            message: "zoneinfo.{fname}: {what}, got {type_of(v)} {v}",
+        },
+    )
+}
+
+fn need_int(fname, name, v) {
+    unless type_of(v) == "int" { bad_argument(fname, "`{name}` must be an Int", v) }
+}
+
+fn need_zone(fname, zone) {
+    unless type_of(zone) == "string" {
+        bad_argument(fname, "`zone` must be a zone name String", zone)
+    }
+}
+
+fn need_fmt(fname, fmt) {
+    unless type_of(fmt) == "string" { bad_argument(fname, "`fmt` must be a String", fmt) }
+    # chrono refuses a bad pattern when formatting; asking it once here turns
+    # its `time.format` error into one that names this function.
+    try { time.format(0, fmt) } catch (e) {
+        error(
+            {
+                kind: "bug",
+                reason: "bad_format",
+                message: "zoneinfo.{fname}: `fmt` is not a valid strftime pattern: \"{fmt}\"",
+                format: fmt,
+            },
+        )
+    }
+}
+
+fn out_of_range(name, v, lo, hi) {
+    error(
+        {
+            kind: "zoneinfo",
+            reason: "out_of_range",
+            message: "zoneinfo.from_components: {name} {v} is outside {lo}..{hi}",
+            field: name,
+            value: v,
+        },
+    )
+}
+
+fn check_range(name, v, lo, hi) {
+    need_int("from_components", name, v)
+    if v < lo or v > hi { out_of_range(name, v, lo, hi) }
+}
+
 # ---- the database ----------------------------------------------------------
 ## Every zone and alias name the database knows, sorted: "Africa/Abidjan"
 ## through "Zulu".
+##
+## example:
+##   contains(zones(), "Europe/Berlin")   # true
 export fn zones() = tz.names()
 
 ## The IANA time zone database release the zones come from, such as "2026e".
 export fn version() = tz.version()
 
 # ---- reading an instant ----------------------------------------------------
-## `zone`'s offset from UTC at instant `ms`, in milliseconds: positive east of
-## Greenwich, so Berlin in summer is 7200000. Raises `{ kind: "parse", format:
-## "zone" }` for a name the database does not know, as every function here does.
-export fn offset(ms, zone) = tz.at(zone, ms // MS_SEC).off * MS_SEC
+## `zone`'s offset from UTC at instant `ms` (Unix ms), in milliseconds:
+## positive east of Greenwich, so Berlin in summer is 7200000.
+##
+## errors: `zoneinfo`/`unknown_zone` for a name the database does not know;
+## `bug`/`bad_argument` when `ms` is not an Int or `zone` not a String.
+##
+## example:
+##   offset(time.parse("2026-07-01T12:00:00Z"), "Europe/Berlin")   # 7200000
+export fn offset(ms, zone) {
+    need_int("offset", "ms", ms)
+    need_zone("offset", zone)
+    tz.at(zone, ms // MS_SEC).off * MS_SEC
+}
 
 ## The wall time instant `ms` shows in `zone`: `{ year, month, day, hour,
 ## minute, second, millisecond, weekday, yearday }` (the fields of
@@ -46,9 +114,14 @@ export fn offset(ms, zone) = tz.at(zone, ms // MS_SEC).off * MS_SEC
 ## `abbreviation` ("CEST"), `dst` and `zone`. Any IANA name or alias works,
 ## such as "Europe/Berlin" or "US/Eastern".
 ##
+## errors: `zoneinfo`/`unknown_zone` for a name the database does not know;
+## `bug`/`bad_argument` when `ms` is not an Int or `zone` not a String.
+##
 ## example:
 ##   in_zone(time.now(), "Asia/Tokyo").hour
 export fn in_zone(ms, zone) {
+    need_int("in_zone", "ms", ms)
+    need_zone("in_zone", zone)
     t = tz.at(zone, ms // MS_SEC)
     wall = ms + t.off * MS_SEC
     dnum = wall // MS_DAY
@@ -76,11 +149,26 @@ export fn in_zone(ms, zone) {
 ##
 ## A time a DST change skips moves forward by the length of the gap: 02:30 on a
 ## night that jumps from 02:00 to 03:00 is 03:30. A time it repeats is the
-## first occurrence, the one still on the earlier offset.
+## first occurrence, the one still on the earlier offset. Every component is
+## checked: month 1-12, a day the month has, hour 0-23, minute and second
+## 0-59, millisecond 0-999.
+##
+## errors: `zoneinfo`/`out_of_range` for a component outside its range (30
+## February, month 13); `zoneinfo`/`unknown_zone` for an unknown zone;
+## `bug`/`bad_argument` when a component is not an Int or `zone` not a String.
 ##
 ## example:
 ##   from_components("America/New_York", 2026, 7, 16, 17)   # 17:00 in New York
 export fn from_components(zone, y, mo, d, h = 0, mi = 0, s = 0, milli = 0) {
+    need_zone("from_components", zone)
+    need_int("from_components", "year", y)
+    check_range("month", mo, 1, 12)
+    need_int("from_components", "day", d)
+    check_range("day", d, 1, calendar.days_in_month(y, mo))
+    check_range("hour", h, 0, 23)
+    check_range("minute", mi, 0, 59)
+    check_range("second", s, 0, 59)
+    check_range("millisecond", milli, 0, 999)
     wall = calendar.days_from_civil(y, mo, d) * MS_DAY +
         h * MS_HOUR +
         mi * MS_MIN +
@@ -93,16 +181,41 @@ export fn from_components(zone, y, mo, d, h = 0, mi = 0, s = 0, milli = 0) {
 fn from_wall(wall, zone) = tz.to_utc(zone, wall // MS_SEC) * MS_SEC + wall % MS_SEC
 
 # The wall time (ms, read as if UTC) an instant shows in `zone`.
-fn local(ms, zone) = ms + offset(ms, zone)
+fn local(ms, zone) = ms + tz.at(zone, ms // MS_SEC).off * MS_SEC
 
 # ---- arithmetic on the wall clock ------------------------------------------
 ## The instant `n` calendar days later in `zone`, at the same wall time. A day
 ## across a DST change is 23 or 25 hours long. `n` may be negative.
-export fn add_days(ms, n, zone) = from_wall(local(ms, zone) + n * MS_DAY, zone)
+##
+## errors: `zoneinfo`/`unknown_zone` for an unknown zone; `bug`/`bad_argument`
+## when `ms` or `n` is not an Int or `zone` not a String.
+##
+## example:
+##   add_days(t, 1, "Europe/Berlin")   # the same wall time tomorrow
+export fn add_days(ms, n, zone) {
+    need_int("add_days", "ms", ms)
+    need_int("add_days", "n", n)
+    need_zone("add_days", zone)
+    from_wall(local(ms, zone) + n * MS_DAY, zone)
+}
 
 ## The instant `n` months later in `zone`, at the same wall time, clamping the
-## day to the target month's length (Jan 31 + 1 month is Feb 28 or 29).
+## day to the target month's length (Jan 31 + 1 month is Feb 28 or 29). `n`
+## may be negative.
+##
+## errors: `zoneinfo`/`unknown_zone` for an unknown zone; `bug`/`bad_argument`
+## when `ms` or `n` is not an Int or `zone` not a String.
+##
+## example:
+##   add_months(t, 1, "America/New_York")
 export fn add_months(ms, n, zone) {
+    need_int("add_months", "ms", ms)
+    need_int("add_months", "n", n)
+    need_zone("add_months", zone)
+    shift_months(ms, n, zone)
+}
+
+fn shift_months(ms, n, zone) {
     c = in_zone(ms, zone)
     total = c.year * 12 + (c.month - 1) + n
     y = total // 12
@@ -114,20 +227,50 @@ export fn add_months(ms, n, zone) {
 
 ## The instant `n` years later in `zone`, at the same wall time. 29 February
 ## plus one year is 28 February.
-export fn add_years(ms, n, zone) = add_months(ms, n * 12, zone)
+##
+## errors: `zoneinfo`/`unknown_zone` for an unknown zone; `bug`/`bad_argument`
+## when `ms` or `n` is not an Int or `zone` not a String.
+##
+## example:
+##   add_years(t, 1, "Europe/Berlin")
+export fn add_years(ms, n, zone) {
+    need_int("add_years", "ms", ms)
+    need_int("add_years", "n", n)
+    need_zone("add_years", zone)
+    shift_months(ms, n * 12, zone)
+}
 
 ## Midnight in `zone` on the day instant `ms` falls on there. On a day a DST
 ## change skips midnight, the first moment of the day.
-export fn start_of_day(ms, zone) = from_wall(local(ms, zone) // MS_DAY * MS_DAY, zone)
+##
+## errors: `zoneinfo`/`unknown_zone` for an unknown zone; `bug`/`bad_argument`
+## when `ms` is not an Int or `zone` not a String.
+##
+## example:
+##   start_of_day(time.now(), "Europe/Berlin")
+export fn start_of_day(ms, zone) {
+    need_int("start_of_day", "ms", ms)
+    need_zone("start_of_day", zone)
+    from_wall(local(ms, zone) // MS_DAY * MS_DAY, zone)
+}
 
 # ---- formatting and parsing ------------------------------------------------
 ## Format instant `ms` as the wall time in `zone`, with a strftime-style
 ## pattern. `%Z` writes the zone's abbreviation ("CEST"), `%z` its offset
-## ("+0200") and `%:z` the offset with a colon ("+02:00").
+## ("+0200") and `%:z` the offset with a colon ("+02:00"). An offset with
+## seconds, which only the local mean time of old dates has, is written with
+## them ("+001932", "+00:19:32").
+##
+## errors: `bug`/`bad_format` for a pattern chrono cannot format, such as a
+## trailing `%`; `zoneinfo`/`unknown_zone` for an unknown zone;
+## `bug`/`bad_argument` for a wrong-typed argument.
 ##
 ## example:
 ##   format(time.now(), "%Y-%m-%d %H:%M %Z", "Europe/Berlin")
 export fn format(ms, fmt, zone) {
+    need_int("format", "ms", ms)
+    need_fmt("format", fmt)
+    need_zone("format", zone)
     t = tz.at(zone, ms // MS_SEC)
     time.format(ms + t.off * MS_SEC, with_zone_fields(fmt, t))
 }
@@ -162,29 +305,147 @@ fn with_zone_fields(fmt, t) {
     out
 }
 
-# "+0530" or "-02:30" from an offset in seconds.
+# "+0530" or "-02:30" from an offset in seconds, with ":ss" or "ss" added when
+# the offset has seconds (local mean time).
 fn offset_text(off, sep) {
     sign = if off < 0 { "-" } else { "+" }
     a = if off < 0 { 0 - off } else { off }
     h = a // 3600
     m = a // 60 % 60
+    sec = a % 60
     pad = fn(n) if n < 10 { "0{n}" } else { "{n}" }
-    "{sign}{pad(h)}{sep}{pad(m)}"
+    tail = if sec == 0 { "" } else { "{sep}{pad(sec)}" }
+    "{sign}{pad(h)}{sep}{pad(m)}{tail}"
 }
 
 ## ISO-8601 for the wall time in `zone`, with its offset:
-## `2026-07-29T15:45:00.000+02:00`. `time.parse` reads it back to the same
-## instant.
-export fn to_iso(ms, zone) = format(ms, "%Y-%m-%dT%H:%M:%S%.3f%:z", zone)
+## `2026-07-29T15:45:00.000+02:00`, which `time.parse` reads back to the same
+## instant. An offset with seconds (local mean time, before about 1900-1940
+## depending on the zone) is written with them, `+00:19:32` as Python does;
+## RFC 3339 has no form for it, so `time.parse` refuses that string rather
+## than reading a different instant.
+##
+## errors: `zoneinfo`/`unknown_zone` for an unknown zone; `bug`/`bad_argument`
+## when `ms` is not an Int or `zone` not a String.
+##
+## example:
+##   to_iso(time.parse("2026-07-01T12:00:00Z"), "Europe/Berlin")   # "2026-07-01T14:00:00.000+02:00"
+export fn to_iso(ms, zone) {
+    need_int("to_iso", "ms", ms)
+    need_zone("to_iso", zone)
+    format(ms, "%Y-%m-%dT%H:%M:%S%.3f%:z", zone)
+}
 
 ## Parse text `s` with a strftime-style pattern as a wall time in `zone`, read
-## the way `from_components` reads one. A pattern with `%z` carries its own
-## offset, so `zone` does not apply to it.
+## the way `from_components` reads one. A pattern with `%z` or `%:z` carries
+## its own offset (`+0200`, `-05:00`), so `zone` does not apply to it; `%%z` is
+## literal text.
+##
+## errors: `zoneinfo`/`no_match` when `s` does not match `fmt`;
+## `bug`/`bad_format` for a pattern chrono cannot read; `zoneinfo`/`unknown_zone`
+## for an unknown zone; `bug`/`bad_argument` for a wrong-typed argument.
 ##
 ## example:
 ##   parse_format("29/07/2026 17:00", "%d/%m/%Y %H:%M", "America/New_York")
 export fn parse_format(s, fmt, zone) {
-    t = time.parse_format(s, fmt)
-    if contains(fmt, "%z") or contains(fmt, "%:z") { return t }
-    from_wall(t, zone)
+    unless type_of(s) == "string" { bad_argument("parse_format", "`s` must be a String", s) }
+    need_fmt("parse_format", fmt)
+    need_zone("parse_format", zone)
+    field = offset_field(fmt)
+    if is_null(field) { return from_wall(parse_wall(s, fmt), zone) }
+    with_offset(s, fmt, field)
+}
+
+fn no_match(s, fmt) {
+    error(
+        {
+            kind: "zoneinfo",
+            reason: "no_match",
+            message: "zoneinfo.parse_format: \"{s}\" does not match the pattern \"{fmt}\"",
+            text: s,
+            format: fmt,
+        },
+    )
+}
+
+# `s` read by `fmt` as a wall time, ms as if UTC.
+fn parse_wall(s, fmt) {
+    try { time.parse_format(s, fmt) } catch (e) {
+        if get(e, "kind") == "parse" { no_match(s, fmt) }
+        error(e)
+    }
+}
+
+# Where the first real %z or %:z sits in `fmt`, as char indexes
+# `{ start, end }`, or null. `%%` is an escaped percent, so `%%z` is not one.
+fn offset_field(fmt) {
+    cs = chars(fmt)
+    mut i = 0
+    while i < len(cs) {
+        if cs[i] == "%" and i + 1 < len(cs) {
+            if cs[i + 1] == "z" { return { start: i, end: i + 2 } }
+            if cs[i + 1] == ":" and i + 2 < len(cs) and cs[i + 2] == "z" {
+                return { start: i, end: i + 3 }
+            }
+            i = i + 2
+        } else { i = i + 1 }
+    }
+    null
+}
+
+fn is_digit(c) = contains("0123456789", c)
+
+# The length of a `+hhmm` / `-hh:mm` offset starting at `cs[i]`, or 0.
+fn offset_len_at(cs, i) {
+    n = len(cs)
+    unless cs[i] == "+" or cs[i] == "-" { return 0 }
+    unless i + 4 < n and is_digit(cs[i + 1]) and is_digit(cs[i + 2]) { return 0 }
+    if cs[i + 3] == ":" {
+        if i + 5 < n and is_digit(cs[i + 4]) and is_digit(cs[i + 5]) { return 6 }
+        return 0
+    }
+    if is_digit(cs[i + 3]) and is_digit(cs[i + 4]) { return 5 }
+    0
+}
+
+# Parse `s` whose pattern has an offset field. The offset is read here, not
+# by `time.parse_format`: each `+hhmm`-shaped run in `s` is tried as the
+# offset, with the rest matched against the pattern minus the field, and the
+# one reading that matches wins. Two readings that disagree are refused.
+fn with_offset(s, fmt, field) {
+    fcs = chars(fmt)
+    rest_fmt = join(slice(fcs, 0, field.start), "") + join(slice(fcs, field.end, len(fcs)), "")
+    cs = chars(s)
+    mut found = []
+    for i in 0..len(cs) {
+        k = offset_len_at(cs, i)
+        if k > 0 {
+            rest = join(slice(cs, 0, i), "") + join(slice(cs, i + k, len(cs)), "")
+            wall = try { time.parse_format(rest, rest_fmt) } catch (e) {
+                unless get(e, "kind") == "parse" { error(e) }
+                null
+            }
+            unless is_null(wall) {
+                sign = if cs[i] == "-" { -1 } else { 1 }
+                mm_at = if k == 6 { i + 4 } else { i + 3 }
+                hh = int(cs[i + 1] + cs[i + 2])
+                mm = int(cs[mm_at] + cs[mm_at + 1])
+                at = wall - sign * (hh * MS_HOUR + mm * MS_MIN)
+                unless contains(found, at) { found = push(found, at) }
+            }
+        }
+    }
+    if len(found) == 0 { no_match(s, fmt) }
+    if len(found) > 1 {
+        error(
+            {
+                kind: "zoneinfo",
+                reason: "ambiguous_offset",
+                message: "zoneinfo.parse_format: \"{s}\" reads more than one way against \"{fmt}\"; put the offset where only it can match",
+                text: s,
+                format: fmt,
+            },
+        )
+    }
+    found[0]
 }

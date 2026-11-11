@@ -345,12 +345,12 @@ test.case("an alias reads as the zone it names", fn() {
     test.eq(zi.in_zone(t, "US/Eastern").zone, "US/Eastern")
 })
 
-test.case("an unknown zone is a parse error naming it", fn() {
+test.case("an unknown zone is an error naming it", fn() {
     e = try {
         zi.in_zone(0, "Europe/Berlinn")
         null
     } catch (err) { err }
-    test.eq(e.kind, "parse")
+    test.eq([e.kind, e.reason, e.zone], ["zoneinfo", "unknown_zone", "Europe/Berlinn"])
     test.ok(contains(e.message, "Europe/Berlinn"), e.message)
 })
 
@@ -439,4 +439,92 @@ test.case("zones lists every name, and version names the release", fn() {
     )
     test.eq(names, sort(names))
     test.eq(zi.version(), "2026e")
+})
+
+# --- fixes ---------------------------------------------------------------------
+
+# The kind and reason a call throws, or null when it returns.
+fn thrown(f) {
+    try {
+        f()
+        null
+    } catch (e) { [get(e, "kind"), get(e, "reason")] }
+}
+
+test.case("parse_format with %z reads the offset in the text, not the zone", fn() {
+    fmt = "%d/%m/%Y %H:%M %z"
+    test.eq(
+        zi.parse_format("29/07/2026 17:00 +0200", fmt, "America/New_York"),
+        utc(2026, 7, 29, 15),
+    )
+    test.eq(zi.parse_format("29/07/2026 17:00 -0500", fmt, "Europe/Berlin"), utc(2026, 7, 29, 22))
+    got = zi.parse_format("2026-07-29T17:30 +05:30", "%Y-%m-%dT%H:%M %:z", "UTC")
+    test.eq(got, utc(2026, 7, 29, 12))
+    # Offset first, then a date full of dashes.
+    test.eq(
+        zi.parse_format("-0300 2026-07-29 09:00", "%z %Y-%m-%d %H:%M", "UTC"),
+        utc(2026, 7, 29, 12),
+    )
+})
+
+test.case("parse_format treats %%z as literal text, not an offset", fn() {
+    got = zi.parse_format("29/07/2026 17:00 %z", "%d/%m/%Y %H:%M %%z", "America/New_York")
+    test.eq(got, utc(2026, 7, 29, 21))
+})
+
+test.case("parse_format refuses text that does not match", fn() {
+    test.eq(
+        thrown(fn() zi.parse_format("29/07/2026", "%d/%m/%Y %H:%M", "UTC")),
+        ["zoneinfo", "no_match"],
+    )
+    test.eq(
+        thrown(fn() zi.parse_format("29/07/2026 17:00", "%d/%m/%Y %H:%M %z", "UTC")),
+        ["zoneinfo", "no_match"],
+    )
+    test.eq(thrown(fn() zi.parse_format("x", "x%", "UTC")), ["bug", "bad_format"])
+})
+
+test.case("format refuses a bad pattern at its own boundary", fn() {
+    test.eq(thrown(fn() zi.format(0, "x%", "UTC")), ["bug", "bad_format"])
+    test.eq(thrown(fn() zi.format(0, 5, "UTC")), ["bug", "bad_argument"])
+})
+
+test.case("an offset with seconds is written in full", fn() {
+    # Amsterdam kept local mean time, +00:19:32, until 1937.
+    t = utc(1900, 1, 1)
+    test.eq(zi.to_iso(t, "Europe/Amsterdam"), "1900-01-01T00:19:32.000+00:19:32")
+    test.eq(zi.format(t, "%z", "Europe/Amsterdam"), "+001932")
+})
+
+test.case("from_components refuses an impossible wall time", fn() {
+    test.eq(thrown(fn() zi.from_components("UTC", 2026, 13, 1)), ["zoneinfo", "out_of_range"])
+    test.eq(thrown(fn() zi.from_components("UTC", 2026, 2, 29)), ["zoneinfo", "out_of_range"])
+    test.eq(thrown(fn() zi.from_components("UTC", 2026, 4, 31)), ["zoneinfo", "out_of_range"])
+    test.eq(thrown(fn() zi.from_components("UTC", 2026, 1, 1, 24)), ["zoneinfo", "out_of_range"])
+    test.eq(thrown(fn() zi.from_components("UTC", 2026, 1, 1, 0, 60)), ["zoneinfo", "out_of_range"])
+    test.eq(
+        thrown(fn() zi.from_components("UTC", 2026, 1, 1, 0, 0, -1)),
+        ["zoneinfo", "out_of_range"],
+    )
+    test.eq(
+        thrown(fn() zi.from_components("UTC", 2026, 1, 1, 0, 0, 0, 1000)),
+        ["zoneinfo", "out_of_range"],
+    )
+    test.eq(thrown(fn() zi.from_components("UTC", 2026, "1", 1)), ["bug", "bad_argument"])
+    test.eq(thrown(fn() zi.from_components("UTC", 2024, 2, 29)), null)
+})
+
+test.case("an unknown zone is a zoneinfo error; a non-string zone is a bug", fn() {
+    test.eq(thrown(fn() zi.offset(0, "Nope/Zone")), ["zoneinfo", "unknown_zone"])
+    test.eq(thrown(fn() zi.in_zone(0, 5)), ["bug", "bad_argument"])
+    test.eq(thrown(fn() zi.in_zone("a", "UTC")), ["bug", "bad_argument"])
+    test.eq(thrown(fn() zi.add_days(0, 1.5, "UTC")), ["bug", "bad_argument"])
+})
+
+test.case("add_years keeps the wall time, and 29 February becomes the 28th", fn() {
+    t = zi.from_components("Europe/Berlin", 2024, 2, 29, 9)
+    got = zi.in_zone(zi.add_years(t, 1, "Europe/Berlin"), "Europe/Berlin")
+    test.eq([got.year, got.month, got.day, got.hour], [2025, 2, 28, 9])
+    back = zi.in_zone(zi.add_years(t, -4, "Europe/Berlin"), "Europe/Berlin")
+    test.eq([back.year, back.month, back.day], [2020, 2, 29])
 })

@@ -16,14 +16,15 @@ import "./tzdata.ecko"
 DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
 DAY = 86400
 
-# The error for a zone name nothing knows. `parse`, an existing kind: the
-# name is input that does not read as a zone.
+# The error for a zone name nothing knows: the name is input the database
+# cannot read, so it is the package's own kind.
 fn unknown(name) {
     error(
         {
-            kind: "parse",
-            format: "zone",
-            message: "unknown time zone '{name}' - see zoneinfo.zones() for the names",
+            kind: "zoneinfo",
+            reason: "unknown_zone",
+            message: "zoneinfo: unknown time zone '{name}' - see zoneinfo.zones() for the names",
+            zone: name,
         },
     )
 }
